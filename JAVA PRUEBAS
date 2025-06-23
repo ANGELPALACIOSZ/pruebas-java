@@ -78,10 +78,6 @@ public class PosSalesReceiver {
     }
 }
 
-
-Java
-
-
 // Paso 2: Implementación de la Lógica de Descuento Automático de Stock
 // Archivo: StockUpdater.java
 package com.totto.functions;
@@ -103,9 +99,9 @@ import java.sql.PreparedStatement;
 import java.util.Optional;
 import java.time.Instant; // Para timestamp
 
-/**
- * Azure Function para recibir ventas y actualizar el stock.
- */
+/
+  Azure Function para recibir ventas y actualizar el stock.
+ /
 public class StockUpdater {
 
     private static final ObjectMapper objectMapper = new ObjectMapper();
@@ -230,16 +226,13 @@ public class StockUpdater {
 
 XML
 
-
 <dependency>
     <groupId>net.logstash.logback</groupId>
     <artifactId>logstash-logback-encoder</artifactId>
     <version>6.5</version>
 </dependency>
 
-
 XML
-
 
 <configuration>
     <appender name="stdout" class="ch.qos.logback.core.ConsoleAppender">
