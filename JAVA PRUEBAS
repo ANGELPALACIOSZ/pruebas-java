@@ -1,0 +1,262 @@
+// Paso 1: Desarrollo del Endpoint API POS → TOTTO en Azure
+// Archivo: PosSalesReceiver.java
+package com.totto.functions;
+
+import com.microsoft.azure.functions.ExecutionContext;
+import com.microsoft.azure.functions.HttpMethod;
+import com.microsoft.azure.functions.HttpRequestMessage;
+import com.microsoft.azure.functions.HttpResponseMessage;
+import com.microsoft.azure.functions.HttpStatus;
+import com.microsoft.azure.functions.annotation.AuthorizationLevel;
+import com.microsoft.azure.functions.annotation.FunctionName;
+import com.microsoft.azure.functions.annotation.HttpTrigger;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.util.Optional;
+
+/
+  Azure Function para recibir datos de ventas del POS y procesar la actualización de stock.
+ /
+public class PosSalesReceiver {
+
+    private static final ObjectMapper objectMapper = new ObjectMapper();
+
+    @FunctionName("receivePosSale")
+    public HttpResponseMessage run(
+            @HttpTrigger(
+                name = "req",
+                methods = {HttpMethod.POST},
+                authLevel = AuthorizationLevel.FUNCTION, // Usar AuthorizationLevel.FUNCTION para seguridad con API key
+                route = "sales")
+            HttpRequestMessage<Optional<String>> request,
+            final ExecutionContext context) {
+
+        context.getLogger().info("Java HTTP trigger procesó una solicitud de venta.");
+
+        String requestBody = request.getBody().orElse(null);
+
+        if (requestBody == null |
+| requestBody.isEmpty()) {
+            context.getLogger().warning("Cuerpo de la solicitud vacío o nulo.");
+            return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
+                        .body("Por favor, envíe un cuerpo de solicitud JSON con los detalles de la venta.")
+                        .build();
+        }
+
+        try {
+            JsonNode jsonNode = objectMapper.readTree(requestBody);
+
+            // Ejemplo de cómo acceder a los datos del payload
+            String transactionId = jsonNode.has("transactionId")? jsonNode.get("transactionId").asText() : "N/A";
+            context.getLogger().info("ID de Transacción recibido: " + transactionId);
+
+            JsonNode itemsNode = jsonNode.get("items");
+            if (itemsNode!= null && itemsNode.isArray()) {
+                for (JsonNode item : itemsNode) {
+                    String sku = item.has("sku")? item.get("sku").asText() : "N/A";
+                    int quantity = item.has("quantity")? item.get("quantity").asInt() : 0;
+                    context.getLogger().info("SKU: " + sku + ", Cantidad: " + quantity);
+                    // Aquí se llamaría a la lógica de actualización de stock (Paso 2)
+                }
+            } else {
+                context.getLogger().warning("El payload no contiene una lista de 'items' válida.");
+            }
+
+            // En un escenario real, la respuesta dependería del resultado de la actualización de stock
+            return request.createResponseBuilder(HttpStatus.OK)
+                        .header("Content-Type", "application/json")
+                        .body("{\"status\": \"success\", \"message\": \"Venta recibida y procesada para stock.\"}")
+                        .build();
+
+        } catch (Exception e) {
+            context.getLogger().severe("Error al parsear el payload JSON o procesar la solicitud: " + e.getMessage());
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body("Error al procesar la solicitud: " + e.getMessage())
+                        .build();
+        }
+    }
+}
+
+
+Java
+
+
+// Paso 2: Implementación de la Lógica de Descuento Automático de Stock
+// Archivo: StockUpdater.java
+package com.totto.functions;
+
+import com.microsoft.azure.functions.ExecutionContext;
+import com.microsoft.azure.functions.HttpMethod;
+import com.microsoft.azure.functions.HttpRequestMessage;
+import com.microsoft.azure.functions.HttpResponseMessage;
+import com.microsoft.azure.functions.HttpStatus;
+import com.microsoft.azure.functions.annotation.AuthorizationLevel;
+import com.microsoft.azure.functions.annotation.FunctionName;
+import com.microsoft.azure.functions.annotation.HttpTrigger;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.util.Optional;
+import java.time.Instant; // Para timestamp
+
+/**
+ * Azure Function para recibir ventas y actualizar el stock.
+ */
+public class StockUpdater {
+
+    private static final ObjectMapper objectMapper = new ObjectMapper();
+    // La cadena de conexión debe obtenerse de forma segura (Application Settings, Key Vault)
+    private static final String DB_CONNECTION_STRING = System.getenv("SqlConnectionString"); 
+    private static final String ECOMMERCE_UPDATE_API_URL = System.getenv("EcommerceUpdateApiUrl");
+
+    @FunctionName("updateStockOnSale")
+    public HttpResponseMessage run(
+            @HttpTrigger(
+                name = "req",
+                methods = {HttpMethod.POST},
+                authLevel = AuthorizationLevel.FUNCTION,
+                route = "sales/process")
+            HttpRequestMessage<Optional<String>> request,
+            final ExecutionContext context) {
+
+        context.getLogger().info("Java HTTP trigger procesó una solicitud de actualización de stock.");
+
+        String requestBody = request.getBody().orElse(null);
+        if (requestBody == null |
+| requestBody.isEmpty()) {
+            return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
+                        .body("Payload de venta vacío.")
+                        .build();
+        }
+
+        Connection dbConnection = null;
+        try {
+            JsonNode salesData = objectMapper.readTree(requestBody);
+            String transactionId = salesData.get("transactionId").asText();
+            JsonNode itemsNode = salesData.get("items");
+
+            if (itemsNode == null ||!itemsNode.isArray()) {
+                throw new IllegalArgumentException("El payload debe contener una lista de 'items'.");
+            }
+
+            dbConnection = DriverManager.getConnection(DB_CONNECTION_STRING);
+            dbConnection.setAutoCommit(false); // Iniciar transacción
+
+            for (JsonNode item : itemsNode) {
+                String sku = item.get("sku").asText();
+                int quantity = item.get("quantity").asInt();
+
+                // 1. Descontar stock en TOTTO (Base de Datos Central)
+                String updateSql = "UPDATE Inventory SET StockQuantity = StockQuantity -? WHERE SKU =?";
+                try (PreparedStatement pstmt = dbConnection.prepareStatement(updateSql)) {
+                    pstmt.setInt(1, quantity);
+                    pstmt.setString(2, sku);
+                    int affectedRows = pstmt.executeUpdate();
+                    if (affectedRows == 0) {
+                        context.getLogger().warning("SKU no encontrado o stock insuficiente para: " + sku);
+                        // Considerar lógica de compensación o rollback si un SKU no se encuentra
+                        throw new RuntimeException("SKU no encontrado o stock insuficiente: " + sku);
+                    }
+                    context.getLogger().info("Stock de SKU " + sku + " descontado en " + quantity + " unidades.");
+                }
+            }
+
+            dbConnection.commit(); // Confirmar transacción si todo fue bien
+            context.getLogger().info("Transacción de stock para " + transactionId + " confirmada.");
+
+            // 2. Sincronizar con E-commerce
+            // Se asume que la API de e-commerce espera un payload similar para la actualización
+            sendToEcommerce(salesData, context);
+            
+            // 3. Registrar log de éxito
+            context.getLogger().info("LOG_SUCCESS: Venta procesada exitosamente. Transacción ID: " + transactionId);
+
+            return request.createResponseBuilder(HttpStatus.OK)
+                        .header("Content-Type", "application/json")
+                        .body("{\"status\": \"success\", \"message\": \"Stock actualizado y e-commerce notificado para transacción " + transactionId + "\"}")
+                        .build();
+
+        } catch (Exception e) {
+            context.getLogger().severe("LOG_ERROR: Error al procesar la venta. Mensaje: " + e.getMessage() + ". StackTrace: " + e.getStackTrace());
+            if (dbConnection!= null) {
+                try {
+                    dbConnection.rollback(); // Deshacer transacción en caso de error
+                    context.getLogger().warning("Transacción de stock revertida debido a un error.");
+                } catch (Exception rollbackEx) {
+                    context.getLogger().severe("Error al intentar revertir la transacción: " + rollbackEx.getMessage());
+                }
+            }
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body("{\"status\": \"error\", \"message\": \"Fallo al actualizar stock: " + e.getMessage() + "\"}")
+                        .build();
+        } finally {
+            if (dbConnection!= null) {
+                try {
+                    dbConnection.close();
+                } catch (Exception closeEx) {
+                    context.getLogger().severe("Error al cerrar la conexión a la base de datos: " + closeEx.getMessage());
+                }
+            }
+        }
+    }
+
+    private void sendToEcommerce(JsonNode salesData, ExecutionContext context) {
+        try {
+            // Aquí se simula una llamada HTTP a la API de e-commerce
+            // En un entorno real, se usaría un cliente HTTP como Apache HttpClient o OkHttp
+            context.getLogger().info("Simulando envío de actualización a e-commerce para transacción: " + salesData.get("transactionId").asText());
+            // Ejemplo de cómo se enviaría un JSON al e-commerce
+            // String ecommercePayload = objectMapper.writeValueAsString(salesData);
+            // HttpClient client = HttpClient.newHttpClient();
+            // HttpRequest request = HttpRequest.newBuilder()
+            //   .uri(URI.create(ECOMMERCE_UPDATE_API_URL))
+            //   .header("Content-Type", "application/json")
+            //   .POST(HttpRequest.BodyPublishers.ofString(ecommercePayload))
+            //   .build();
+            // HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            // context.getLogger().info("Respuesta de e-commerce: " + response.statusCode() + " - " + response.body());
+            context.getLogger().info("Actualización de e-commerce simulada como exitosa.");
+        } catch (Exception e) {
+            context.getLogger().severe("Error al notificar al e-commerce: " + e.getMessage());
+            // Se podría considerar una cola de reintentos para actualizaciones fallidas al e-commerce
+        }
+    }
+}
+
+
+XML
+
+
+<dependency>
+    <groupId>net.logstash.logback</groupId>
+    <artifactId>logstash-logback-encoder</artifactId>
+    <version>6.5</version>
+</dependency>
+
+
+XML
+
+
+<configuration>
+    <appender name="stdout" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LoggingEventCompositeJsonEncoder">
+            <providers>
+                <timestamp><fieldName>timestamp</fieldName><timeZone>UTC</timeZone></timestamp>
+                <loggerName><fieldName>logger</fieldName></loggerName>
+                <logLevel><fieldName>level</fieldName></logLevel>
+                <threadName><fieldName>thread</fieldName></threadName>
+                <nestedField><fieldName>mdc</fieldName><providers><mdc /></providers></nestedField>
+                <stackTrace><fieldName>stackTrace</fieldName><throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter"><maxDepthPerThrowable>200</maxDepthPerThrowable><maxLength>14000</maxLength><rootCauseFirst>true</rootCauseFirst></throwableConverter></stackTrace>
+                <message />
+                <throwableClassName><fieldName>exceptionClass</fieldName></throwableClassName>
+            </providers>
+        </encoder>
+    </appender>
+    <root level="info">
+        <appender-ref ref="stdout" />
+    </root>
+</configuration>
